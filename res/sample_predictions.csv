@@ -1,3 +1,0 @@
-eeg_file,prediction
-sub01_sess3_epoch002.npy,background
-sub01_sess3_epoch004.npy,target
