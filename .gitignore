@@ -1,0 +1,8 @@
+img.png
+models/
+data/
+res/
+__pycache__
+.idea/
+CLAUDE.md
+.gitignore
