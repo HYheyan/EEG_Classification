@@ -1,7 +1,7 @@
 """Data loading and preprocessing for EEG classification.
 
 Two loading modes (auto-detected):
-  1. .pt cache  — single torch.load(), instant (run convert_data.py once)
+  1. .pt cache — single torch.load(), instant (run convert_data.py once)
   2. .npy files — individual np.load() per file, preloaded into RAM
 
 Preprocessing pipeline (applied once, cached):
@@ -54,7 +54,7 @@ class EEGDataset(torch.utils.data.Dataset):
         self.augment = augment
         self.return_subject = return_subject
 
-        # ---- Try .pt cache first ----------------------------------------------
+        # ---- Try .pt cache first --------------------------------------------
         if cache_path is None:
             cache_path = self.data_dir.parent / f"{self.data_dir.name}_cache.pt"
         cache_path = Path(cache_path)
@@ -79,7 +79,7 @@ class EEGDataset(torch.utils.data.Dataset):
             self.samples = pd.DataFrame(rows)
 
         else:
-            # ---- Fallback: load from .npy files --------------------------------
+            # ---- Fallback: load from .npy files ------------------------------
             warnings.warn(
                 f"No cache at {cache_path}. Run `python convert_data.py` once.\n"
                 f"  Falling back to loading .npy files (slower)."
@@ -87,7 +87,7 @@ class EEGDataset(torch.utils.data.Dataset):
             self._load_from_npy(label_csv, selected_indices)
             selected_indices = None  # already applied
 
-        # ---- Apply index selection (k-fold CV) --------------------------------
+        # ---- Apply index selection (k-fold CV) ------------------------------
         if selected_indices is not None:
             self.samples = self.samples.iloc[selected_indices].reset_index(drop=True)
             keep = torch.tensor(selected_indices)
@@ -97,7 +97,7 @@ class EEGDataset(torch.utils.data.Dataset):
             if self._subjects is not None:
                 self._subjects = self._subjects[keep]
 
-        # Build subject→idx from data if not from cache
+        # Build subject-to-index from data if not from cache
         if self.has_subject and not self.subject_to_idx:
             for s in sorted(self.samples["subject"].unique()):
                 self.subject_to_idx[s] = len(self.subject_to_idx)

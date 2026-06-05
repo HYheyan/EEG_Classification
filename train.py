@@ -6,7 +6,7 @@ Key techniques for small-data regime (~1500 samples):
 - SWA (Stochastic Weight Averaging) — better generalization
 - Warmup + CosineAnnealingWarmRestarts — stable training
 - K-fold cross-validation (5-fold) with ensemble save
-- Grid search for hyperparameter tuning
+- Coordinate-wise hyperparameter tuning
 - Focal Loss option — focus on hard-to-classify examples
 """
 
@@ -27,12 +27,7 @@ from torch.optim.swa_utils import AveragedModel, SWALR
 from torch.utils.data import DataLoader
 
 from load_data import EEGDataset, build_kfold_indices, build_split_indices
-from model import EEGNet, EEGNetV2
-
-MODEL_REGISTRY = {
-    "eegnet": EEGNet,
-    "eegnetv2": EEGNetV2,
-}
+from model import EEGNet
 from utils import get_device, set_seed
 
 
@@ -58,7 +53,6 @@ CONFIG: Dict = {
     "augment_train": True,
 
     # Model
-    "model": "eegnet",       # "eegnet" | "eegnetv2"
     "f1": 16,
     "depth": 2,
     "f2": 32,               # = depth * f1
@@ -95,7 +89,7 @@ CONFIG: Dict = {
 
 
 # ---------------------------------------------------------------------------
-# Focal Loss — down-weights easy examples, focuses on hard ones
+# Focal Loss
 # ---------------------------------------------------------------------------
 
 class FocalLoss(nn.Module):
@@ -205,8 +199,7 @@ def train_one_fold(
     sample = train_ds[0]
     sample_eeg = sample[0]
     num_subjects = len(train_ds.subject_to_idx) if params["use_subject"] else 0
-    model_cls = MODEL_REGISTRY.get(params.get("model", "eegnet"), EEGNet)
-    model = model_cls(
+    model = EEGNet(
         input_shape=tuple(sample_eeg.shape),
         f1=params["f1"], depth=params["depth"], f2=params["f2"],
         dropout_rate=params["dropout_rate"], use_se=params["use_se"],
@@ -343,8 +336,7 @@ def train_one_fold(
         torch.save(best_state, fold_dir / "best_model.pth")
 
     if epoch >= params["swa_start"]:
-        # Custom BN update: built-in update_bn() doesn't pass subject_idx,
-        # causing shape mismatch when use_subject=True
+        # Custom BN update: built-in update_bn() doesn't pass subject_idx
         swa_model.train()
         with torch.no_grad():
             for batch in train_loader:
@@ -378,11 +370,7 @@ def run_kfold_cv(params: Dict, device: torch.device) -> List[Dict]:
 
 
 def run_loso_cv(params: Dict, device: torch.device) -> List[Dict]:
-    """Leave-One-Subject-Out: train on N-1 subjects, test on the held-out one.
-
-    This is the most honest evaluation — it tests whether the model
-    generalizes to people it has never seen during training.
-    """
+    """Leave-One-Subject-Out cross-validation."""
     df = pd.read_csv(CONFIG["train_label_csv"])
     subjects = sorted(df["subject"].unique())
 
@@ -420,16 +408,15 @@ def run_single_split(params: Dict, device: torch.device):
 
 
 # ---------------------------------------------------------------------------
-# Coordinate-wise line search — 逐个参数调优，每轮仅 ~15 次训练
+# Coordinate-wise line search
 # ---------------------------------------------------------------------------
 
 def line_search(device: torch.device, rounds: int = 2) -> None:
     """Coordinate-wise hyperparameter search.
 
-    Each round: fix 4 params, vary the 5th. Tests 3-4 values per param.
+    Each round: fix 4 params, vary the 5th.
     Total: ~15 runs/round instead of 3^5=243 for full grid search.
     """
-    # (param_key, [values to try])
     search_space = [
         ("f1",              [16, 20, 24]),
         ("dropout_rate",    [0.25, 0.3, 0.4]),
@@ -438,7 +425,6 @@ def line_search(device: torch.device, rounds: int = 2) -> None:
         ("mixup_alpha",     [0.0, 0.2, 0.4]),
     ]
 
-    # Start from current defaults
     best_params = _build_params()
     best_acc = 0.0
     best_state = None
@@ -477,7 +463,6 @@ def line_search(device: torch.device, rounds: int = 2) -> None:
                 else:
                     print()
 
-            # Update best value for this param
             best_params[param_key] = best_val_for_param
             if param_key == "f1":
                 best_params["f2"] = best_params["depth"] * best_val_for_param
@@ -500,7 +485,7 @@ def line_search(device: torch.device, rounds: int = 2) -> None:
 
 def _build_params() -> Dict:
     return {k: CONFIG[k] for k in [
-        "model", "f1", "depth", "f2", "dropout_rate", "use_se",
+        "f1", "depth", "f2", "dropout_rate", "use_se",
         "use_subject", "subject_embed_dim",
         "learning_rate", "weight_decay", "batch_size",
         "label_smoothing", "mixup_alpha", "focal_gamma",
@@ -517,8 +502,6 @@ def main() -> None:
     p = argparse.ArgumentParser(description="EEG classifier training")
 
     # Model
-    p.add_argument("--model", default=CONFIG["model"],
-                   choices=["eegnet", "eegnetv2"])
     p.add_argument("--f1", type=int, default=CONFIG["f1"])
     p.add_argument("--depth", type=int, default=CONFIG["depth"])
     p.add_argument("--f2", type=int, default=None)
@@ -550,7 +533,6 @@ def main() -> None:
 
     args = p.parse_args()
 
-    CONFIG["model"] = args.model
     CONFIG["f1"] = args.f1
     CONFIG["depth"] = args.depth
     CONFIG["f2"] = args.f2 if args.f2 else args.depth * args.f1
