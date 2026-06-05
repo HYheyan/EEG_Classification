@@ -13,6 +13,7 @@ Key techniques for small-data regime (~1500 samples):
 from __future__ import annotations
 
 import argparse
+import platform
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -26,7 +27,12 @@ from torch.optim.swa_utils import AveragedModel, SWALR
 from torch.utils.data import DataLoader
 
 from load_data import EEGDataset, build_kfold_indices, build_split_indices
-from model import EEGNet
+from model import EEGNet, EEGNetV2
+
+MODEL_REGISTRY = {
+    "eegnet": EEGNet,
+    "eegnetv2": EEGNetV2,
+}
 from utils import get_device, set_seed
 
 
@@ -46,24 +52,25 @@ CONFIG: Dict = {
     # General
     "epochs": 200,
     "seed": 42,
-    "num_workers": 0,
+    "num_workers": 0 if platform.system() == "Windows" else 2,
     "use_cpu": False,
     "early_stop_patience": 50,
     "augment_train": True,
 
     # Model
-    "f1": 20,
+    "model": "eegnet",       # "eegnet" | "eegnetv2"
+    "f1": 16,
     "depth": 2,
-    "f2": 40,               # = depth * f1
-    "dropout_rate": 0.3,
+    "f2": 32,               # = depth * f1
+    "dropout_rate": 0.4,
     "use_se": False,         # enable with --se
     "use_subject": False,    # enable with --use-subject
     "subject_embed_dim": 16,
 
     # Optimizer
-    "learning_rate": 1e-3,
+    "learning_rate": 2e-3,
     "weight_decay": 1e-3,
-    "batch_size": 64,
+    "batch_size": 128,
 
     # LR schedule
     "warmup_epochs": 8,
@@ -185,7 +192,8 @@ def train_one_fold(
     train_loader = DataLoader(
         train_ds, batch_size=params["batch_size"], shuffle=True,
         num_workers=CONFIG["num_workers"],
-        pin_memory=torch.cuda.is_available(), drop_last=False,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=False,
     )
     val_loader = DataLoader(
         val_ds, batch_size=params["batch_size"] * 2, shuffle=False,
@@ -197,7 +205,8 @@ def train_one_fold(
     sample = train_ds[0]
     sample_eeg = sample[0]
     num_subjects = len(train_ds.subject_to_idx) if params["use_subject"] else 0
-    model = EEGNet(
+    model_cls = MODEL_REGISTRY.get(params.get("model", "eegnet"), EEGNet)
+    model = model_cls(
         input_shape=tuple(sample_eeg.shape),
         f1=params["f1"], depth=params["depth"], f2=params["f2"],
         dropout_rate=params["dropout_rate"], use_se=params["use_se"],
@@ -491,7 +500,7 @@ def line_search(device: torch.device, rounds: int = 2) -> None:
 
 def _build_params() -> Dict:
     return {k: CONFIG[k] for k in [
-        "f1", "depth", "f2", "dropout_rate", "use_se",
+        "model", "f1", "depth", "f2", "dropout_rate", "use_se",
         "use_subject", "subject_embed_dim",
         "learning_rate", "weight_decay", "batch_size",
         "label_smoothing", "mixup_alpha", "focal_gamma",
@@ -508,6 +517,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="EEG classifier training")
 
     # Model
+    p.add_argument("--model", default=CONFIG["model"],
+                   choices=["eegnet", "eegnetv2"])
     p.add_argument("--f1", type=int, default=CONFIG["f1"])
     p.add_argument("--depth", type=int, default=CONFIG["depth"])
     p.add_argument("--f2", type=int, default=None)
@@ -539,6 +550,7 @@ def main() -> None:
 
     args = p.parse_args()
 
+    CONFIG["model"] = args.model
     CONFIG["f1"] = args.f1
     CONFIG["depth"] = args.depth
     CONFIG["f2"] = args.f2 if args.f2 else args.depth * args.f1

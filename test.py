@@ -18,7 +18,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from load_data import EEGDataset
-from model import EEGNet
+from model import EEGNet, EEGNetV2
+
+MODEL_REGISTRY = {
+    "eegnet": EEGNet,
+    "eegnetv2": EEGNetV2,
+}
 from utils import get_device
 
 
@@ -32,7 +37,7 @@ CONFIG = {
     "train_label_csv": DATA_ROOT / "train_labels.csv",
     "model_path": MODEL_DIR / "best_model.pth",
     "output_csv": RES_DIR / "predictions.csv",
-    "batch_size": 64,
+    "batch_size": 128,
     "num_workers": 0,
 }
 
@@ -49,8 +54,10 @@ def extract_subject(filename: str) -> int:
 
 
 def load_model(path: Path, device: torch.device,
-               num_subjects: int = 0) -> torch.nn.Module:
-    model = EEGNet(
+               num_subjects: int = 0,
+               model_name: str = "eegnet") -> torch.nn.Module:
+    model_cls = MODEL_REGISTRY.get(model_name, EEGNet)
+    model = model_cls(
         input_shape=(1, 59, 282), num_subjects=num_subjects,
     ).to(device)
     model.load_state_dict(torch.load(path, map_location=device))
@@ -106,12 +113,15 @@ def main() -> None:
     p.add_argument("--output", type=str, default=None)
     p.add_argument("--use-subject", action="store_true",
                    help="Enable subject embedding (must match training)")
+    p.add_argument("--arch", default="eegnet", choices=["eegnet", "eegnetv2"],
+                   help="Model architecture (default: eegnet)")
     p.add_argument("--cpu", action="store_true")
     args = p.parse_args()
 
     device = get_device(args.cpu)
     num_subjects = len(SUBJECT_ORDER) if args.use_subject else 0
-    print(f"Device: {device} | Subject-embed: {args.use_subject}")
+    model_name = args.arch
+    print(f"Device: {device} | Arch: {model_name} | Subject-embed: {args.use_subject}")
 
     # Build subject mapping from filenames (since test has no label CSV)
     test_ds = EEGDataset(
@@ -151,14 +161,14 @@ def main() -> None:
         print(f"Ensemble: {len(files)} models")
         for f in files:
             print(f"  {f.name}")
-        models = [load_model(f, device, num_subjects) for f in files]
+        models = [load_model(f, device, num_subjects, model_name) for f in files]
         df = predict_ensemble(models, test_loader, device, args.use_subject)
     else:
         path = Path(args.model) if args.model else CONFIG["model_path"]
         if not path.exists():
             raise FileNotFoundError(f"Model not found: {path}")
         print(f"Model: {path}")
-        model = load_model(path, device, num_subjects)
+        model = load_model(path, device, num_subjects, model_name)
         df = predict_single(model, test_loader, device, args.use_subject)
 
     df.to_csv(out, index=False)

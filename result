@@ -56,3 +56,32 @@ Train: 1356, Val: 338
     Early stop at epoch 128
 
 Best val_acc: 0.7278 (epoch 78)
+
+
+f1 20
+dropout 0.4
+lr 0.001/0.002
+wd 0.005
+
+
+
+调参结束
+(sat) PS C:\Users\32769\Desktop\EEG_Classification> python train.py --cv single --f1 16 --dropout 0.4 --lr 0.002 --weight-decay 0.001 --mixup 0.2
+Device: cuda | F1=16 D=2 F2=32 | CV=single | Epochs=200
+Train: 1356, Val: 338
+  Loading from cache: C:\Users\32769\Desktop\EEG_Classification\data\train_cache.pt
+  Loading from cache: C:\Users\32769\Desktop\EEG_Classification\data\train_cache.pt
+  Params: 21,250
+    Ep 001 | loss=1.0062 | vloss=0.7103 | vacc=0.5000
+    Ep 010 | loss=0.6957 | vloss=0.6289 | vacc=0.6420
+    Ep 020 | loss=0.5972 | vloss=0.6032 | vacc=0.6805
+    Ep 030 | loss=0.5601 | vloss=0.6009 | vacc=0.7160
+    Ep 040 | loss=0.5537 | vloss=0.6015 | vacc=0.7219
+    Ep 050 | loss=0.5653 | vloss=0.6058 | vacc=0.7130
+    Ep 060 | loss=0.5259 | vloss=0.6137 | vacc=0.7071
+    Ep 070 | loss=0.5292 | vloss=0.6173 | vacc=0.7041
+    Ep 080 | loss=0.5368 | vloss=0.6175 | vacc=0.7041
+    Ep 090 | loss=0.5303 | vloss=0.6255 | vacc=0.7071
+    Early stop at epoch 90
+
+Best val_acc: 0.7219 (epoch 40)
