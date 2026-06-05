@@ -1,0 +1,58 @@
+// 基准！！
+(sat) PS C:\Users\32769\Desktop\EEG_Classification> python train.py --cv single
+Device: cuda | F1=20 D=2 F2=40 | CV=single | Epochs=200
+Train: 1356, Val: 338
+  Params: 32,002
+    Ep 001 | loss=0.8740 | vloss=0.7005 | vacc=0.5237
+    Ep 010 | loss=0.6623 | vloss=0.6529 | vacc=0.6213
+    Ep 020 | loss=0.5668 | vloss=0.6198 | vacc=0.6864
+    Ep 030 | loss=0.5700 | vloss=0.6161 | vacc=0.6923
+    Ep 040 | loss=0.5530 | vloss=0.6387 | vacc=0.6982
+    Ep 050 | loss=0.5068 | vloss=0.6493 | vacc=0.6982
+    Ep 060 | loss=0.5090 | vloss=0.6400 | vacc=0.6982
+    Ep 070 | loss=0.5155 | vloss=0.6442 | vacc=0.6982
+    Ep 080 | loss=0.4992 | vloss=0.6507 | vacc=0.7071
+    Early stop at epoch 83
+
+Best val_acc: 0.7219 (epoch 33)
+
+//SE注意力！！
+(sat) PS C:\Users\32769\Desktop\EEG_Classification>   python train.py --cv single --se
+Device: cuda | F1=20 D=2 F2=40 | CV=single | Epochs=200
+Train: 1356, Val: 338
+  Params: 33,702
+    Ep 001 | loss=1.0034 | vloss=0.7589 | vacc=0.5207
+    Ep 010 | loss=0.6527 | vloss=0.5960 | vacc=0.6982
+    Ep 020 | loss=0.5731 | vloss=0.5997 | vacc=0.6775
+    Ep 030 | loss=0.5425 | vloss=0.6121 | vacc=0.6834
+    Ep 040 | loss=0.5538 | vloss=0.6207 | vacc=0.6746
+    Ep 050 | loss=0.5123 | vloss=0.6292 | vacc=0.6834
+    Ep 060 | loss=0.5070 | vloss=0.6569 | vacc=0.6834
+    Ep 070 | loss=0.5262 | vloss=0.6531 | vacc=0.6834
+    Ep 080 | loss=0.4722 | vloss=0.6454 | vacc=0.7041
+    Ep 090 | loss=0.4851 | vloss=0.6721 | vacc=0.6746
+    Early stop at epoch 96
+
+Best val_acc: 0.7071 (epoch 46)
+
+//被试嵌入！！
+(sat) PS C:\Users\32769\Desktop\EEG_Classification>   python train.py --cv single --use-subject
+Device: cuda | F1=20 D=2 F2=40 | CV=single | Epochs=200
+Train: 1356, Val: 338
+  Params: 34,726
+    Ep 001 | loss=0.9511 | vloss=0.7376 | vacc=0.4970
+    Ep 010 | loss=0.6679 | vloss=0.6342 | vacc=0.6627
+    Ep 020 | loss=0.5668 | vloss=0.6099 | vacc=0.6805
+    Ep 030 | loss=0.5490 | vloss=0.6081 | vacc=0.7012
+    Ep 040 | loss=0.5627 | vloss=0.6015 | vacc=0.6775
+    Ep 060 | loss=0.4998 | vloss=0.6207 | vacc=0.6953
+    Ep 070 | loss=0.4990 | vloss=0.6265 | vacc=0.7071
+    Ep 080 | loss=0.4808 | vloss=0.6343 | vacc=0.7012
+    Ep 090 | loss=0.4932 | vloss=0.6270 | vacc=0.6864
+    Ep 100 | loss=0.4745 | vloss=0.6324 | vacc=0.6864
+    Ep 050 | loss=0.4836 | vloss=0.6354 | vacc=0.6805
+    Ep 110 | loss=0.4724 | vloss=0.6582 | vacc=0.6834
+    Ep 120 | loss=0.4596 | vloss=0.6825 | vacc=0.6686
+    Early stop at epoch 128
+
+Best val_acc: 0.7278 (epoch 78)

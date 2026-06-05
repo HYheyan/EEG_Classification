@@ -33,6 +33,7 @@ class EEGDataset(torch.utils.data.Dataset):
     normalize : Apply CAR + z-score normalization.
     selected_indices : Subset of samples to use (for k-fold CV).
     augment : Apply data augmentation (training only).
+    return_subject : If True, also return the subject index (for subject embedding).
     """
 
     def __init__(
@@ -42,18 +43,22 @@ class EEGDataset(torch.utils.data.Dataset):
         normalize: bool = True,
         selected_indices: Optional[List[int]] = None,
         augment: bool = False,
+        return_subject: bool = False,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.normalize = normalize
         self.augment = augment
+        self.return_subject = return_subject
 
         if label_csv is None:
             eeg_files = sorted(p.name for p in self.data_dir.glob("*.npy"))
             self.samples = pd.DataFrame({"eeg_file": eeg_files})
             self.has_label = False
+            self.has_subject = False
         else:
             self.samples = pd.read_csv(label_csv)
             self.has_label = True
+            self.has_subject = "subject" in self.samples.columns
 
         if selected_indices is not None:
             self.samples = self.samples.iloc[selected_indices].reset_index(drop=True)
@@ -63,6 +68,12 @@ class EEGDataset(torch.utils.data.Dataset):
 
         if self.has_label and "label" not in self.samples.columns:
             raise ValueError("training label csv must contain column: label")
+
+        # Build subject→index mapping
+        self.subject_to_idx: Dict[str, int] = {}
+        if self.has_subject and self.return_subject:
+            for s in sorted(self.samples["subject"].unique()):
+                self.subject_to_idx[s] = len(self.subject_to_idx)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -90,7 +101,16 @@ class EEGDataset(torch.utils.data.Dataset):
 
         if self.has_label:
             label = torch.tensor(LABEL_TO_INDEX[row["label"]], dtype=torch.long)
+            if self.return_subject and self.has_subject:
+                subj_idx = torch.tensor(
+                    self.subject_to_idx[row["subject"]], dtype=torch.long)
+                return eeg_tensor, label, subj_idx
             return eeg_tensor, label
+
+        if self.return_subject and self.has_subject:
+            subj_idx = torch.tensor(
+                self.subject_to_idx[row["subject"]], dtype=torch.long)
+            return eeg_tensor, row["eeg_file"], subj_idx
         return eeg_tensor, row["eeg_file"]
 
     # ------------------------------------------------------------------
