@@ -48,6 +48,7 @@ class EEGDataset(torch.utils.data.Dataset):
         augment: bool = False,
         return_subject: bool = False,
         cache_path: Optional[str | Path] = None,
+        augmented: bool = False,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.normalize = normalize
@@ -56,7 +57,8 @@ class EEGDataset(torch.utils.data.Dataset):
 
         # ---- Try .pt cache first --------------------------------------------
         if cache_path is None:
-            cache_path = self.data_dir.parent / f"{self.data_dir.name}_cache.pt"
+            suffix = "_augmented" if augmented else ""
+            cache_path = self.data_dir.parent / f"{self.data_dir.name}_cache{suffix}.pt"
         cache_path = Path(cache_path)
 
         if cache_path.exists():
@@ -67,6 +69,7 @@ class EEGDataset(torch.utils.data.Dataset):
             self._labels = archive.get("label", None)        # (N,) or None
             self._subjects = archive.get("subject", None)    # (N,) or None
             self.subject_to_idx: Dict[str, int] = archive.get("subject_to_idx", {})
+            self.multiplier: int = archive.get("multiplier", 0)  # 0 = not augmented
             self.has_label = self._labels is not None
             self.has_subject = self._subjects is not None
 
@@ -85,6 +88,7 @@ class EEGDataset(torch.utils.data.Dataset):
                 f"  Falling back to loading .npy files (slower)."
             )
             self._load_from_npy(label_csv, selected_indices)
+            self.multiplier = 0
             selected_indices = None  # already applied
 
         # ---- Apply index selection (k-fold CV) ------------------------------

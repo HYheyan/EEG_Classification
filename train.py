@@ -45,7 +45,7 @@ CONFIG: Dict = {
     "train_label_csv": DATA_ROOT / "train_labels.csv",
 
     # General
-    "epochs": 200,
+    "epochs": 500,
     "seed": 42,
     "num_workers": 0 if platform.system() == "Windows" else 2,
     "use_cpu": False,
@@ -82,6 +82,10 @@ CONFIG: Dict = {
     "k_folds": 5,
     "val_ratio": 0.2,
     "mccv_rounds": 20,
+
+    # Augmented dataset
+    "use_augmented": False,
+    "augment_multiplier": 2,
 }
 
 
@@ -167,12 +171,37 @@ def train_one_fold(
     ds_kwargs = dict(
         data_dir=CONFIG["train_dir"], label_csv=CONFIG["train_label_csv"],
     )
-    train_ds = EEGDataset(
-        **ds_kwargs, selected_indices=train_indices,
-        augment=CONFIG["augment_train"],
-    )
+    use_aug = params.get("use_augmented", False)
+
+    if use_aug:
+        # Augmented cache layout: [N originals] + [N*M augmented copies]
+        #   original i → index i
+        #   copy k of original i → index N + i*M + k
+        N = len(train_indices) + len(val_indices)
+        M = CONFIG["augment_multiplier"]
+
+        # Training: all originals in train split + all their augmented copies
+        aug_train_indices = list(train_indices)
+        for i in train_indices:
+            for k in range(M):
+                aug_train_indices.append(N + i * M + k)
+
+        print(f"  Augmented train: {len(aug_train_indices)} samples "
+              f"({len(train_indices)} orig + {len(aug_train_indices) - len(train_indices)} aug)")
+
+        train_ds = EEGDataset(
+            **ds_kwargs, selected_indices=aug_train_indices,
+            augment=CONFIG["augment_train"], augmented=True,
+        )
+    else:
+        train_ds = EEGDataset(
+            **ds_kwargs, selected_indices=train_indices,
+            augment=CONFIG["augment_train"],
+        )
+
     val_ds = EEGDataset(
         **ds_kwargs, selected_indices=val_indices, augment=False,
+        augmented=False,
     )
     train_loader = DataLoader(
         train_ds, batch_size=params["batch_size"], shuffle=True,
@@ -471,6 +500,7 @@ def _build_params() -> Dict:
         "label_smoothing", "mixup_alpha", "focal_gamma",
         "grad_clip_norm", "scheduler_t0", "scheduler_t_mult",
         "warmup_epochs", "swa_start", "swa_lr",
+        "use_augmented",
     ]}
 
 
@@ -522,6 +552,13 @@ def main() -> None:
     p.add_argument("--k-folds", type=int, default=CONFIG["k_folds"])
     p.add_argument("--mccv-rounds", type=int, default=CONFIG["mccv_rounds"])
 
+    # Augmented dataset
+    p.add_argument("--augmented", action="store_true", default=False,
+                   help="Use offline-augmented training cache (train_cache_augmented.pt)")
+    p.add_argument("--no-augmented", action="store_false", dest="augmented")
+    p.add_argument("--augment-multiplier", type=int, default=CONFIG["augment_multiplier"],
+                   help="Multiplier used for augmented cache (default: 2)")
+
     # Line search
     p.add_argument("--tune", action="store_true",
                    help="Coordinate-wise hyperparameter search (5 params)")
@@ -546,6 +583,8 @@ def main() -> None:
     CONFIG["cv_mode"] = args.cv
     CONFIG["k_folds"] = args.k_folds
     CONFIG["mccv_rounds"] = args.mccv_rounds
+    CONFIG["use_augmented"] = args.augmented
+    CONFIG["augment_multiplier"] = args.augment_multiplier
 
     set_seed(CONFIG["seed"])
     device = get_device(CONFIG["use_cpu"])
