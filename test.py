@@ -41,27 +41,28 @@ FOLD_WEIGHTS = [0.7257, 0.7227, 0.7257, 0.7198, 0.7130]
 FOLD_WEIGHTS = np.array(FOLD_WEIGHTS, dtype=np.float32)
 FOLD_WEIGHTS = FOLD_WEIGHTS / FOLD_WEIGHTS.sum()
 
-# Subject order (must match training)
-SUBJECT_ORDER = ["sub01", "sub02", "sub03", "sub04", "sub05"]
-
 # TTA variants
 TTA_SHIFT_PCT = 0.01   # ±1% of time steps
 TTA_SCALE = 0.01       # ±1% amplitude
 
 
-def extract_subject(filename: str) -> int:
-    for i, s in enumerate(SUBJECT_ORDER):
-        if filename.startswith(s):
-            return i
-    return 0
-
-
-def load_model(path: Path, device: torch.device,
-               num_subjects: int = 0) -> torch.nn.Module:
-    model = EEGNet(
-        input_shape=(1, 59, 282), num_subjects=num_subjects,
-    ).to(device)
+def load_model(path: Path, device: torch.device) -> torch.nn.Module:
     state = torch.load(path, map_location=device, weights_only=True)
+    # Strip "module." prefix if checkpoint came from SWA's AveragedModel
+    if "n_averaged" in state or any(k.startswith("module.") for k in state):
+        state = {k.replace("module.", ""): v
+                 for k, v in state.items() if k != "n_averaged"}
+
+    # Infer architecture from checkpoint shapes
+    f1 = state["bn_temp.weight"].shape[0]
+    f2 = state["bn_spatial.weight"].shape[0]
+    depth = f2 // f1
+    dropout_rate = 0.4  # default, not inferrable
+
+    model = EEGNet(
+        input_shape=(1, 59, 282),
+        f1=f1, depth=depth, f2=f2, dropout_rate=dropout_rate,
+    ).to(device)
     model.load_state_dict(state)
     model.eval()
     return model
@@ -147,15 +148,12 @@ def main() -> None:
     p.add_argument("--no-tta", action="store_true",
                    help="Disable test-time augmentation")
     p.add_argument("--output", type=str, default=None)
-    p.add_argument("--use-subject", action="store_true",
-                   help="Enable subject embedding (must match training)")
     p.add_argument("--cpu", action="store_true")
     args = p.parse_args()
 
     device = get_device(args.cpu)
-    num_subjects = len(SUBJECT_ORDER) if args.use_subject else 0
     use_tta = not args.no_tta
-    print(f"Device: {device} | TTA: {use_tta} | Subject-embed: {args.use_subject}")
+    print(f"Device: {device} | TTA: {use_tta}")
 
     # ---- Load models -------------------------------------------------------
     if args.model:
@@ -180,24 +178,12 @@ def main() -> None:
     for p, w in zip(paths, weights):
         print(f"  {p.name}  (weight={w:.4f})")
 
-    models = [load_model(p, device, num_subjects) for p in paths]
+    models = [load_model(p, device) for p in paths]
 
     # ---- Dataset -----------------------------------------------------------
     test_ds = EEGDataset(
         data_dir=CONFIG["test_dir"], label_csv=None,
-        return_subject=args.use_subject,
     )
-    if args.use_subject:
-        test_ds.has_subject = True
-        test_ds.subject_to_idx = {s: i for i, s in enumerate(SUBJECT_ORDER)}
-        orig_getitem = test_ds.__getitem__
-        def new_getitem(idx):
-            result = orig_getitem(idx)
-            if len(result) == 2:
-                eeg, fname = result
-                return eeg, fname, extract_subject(fname)
-            return result
-        test_ds.__getitem__ = new_getitem
 
     test_loader = DataLoader(
         test_ds, batch_size=CONFIG["batch_size"], shuffle=False,

@@ -6,7 +6,6 @@ Input: (B, 1, 59, 282) — 1 channel, 59 electrodes, 282 time points.
 
 from __future__ import annotations
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -32,9 +31,6 @@ class EEGNet(nn.Module):
         depth: int = 2,
         f2: int = 32,
         dropout_rate: float = 0.4,
-        use_se: bool = False,
-        num_subjects: int = 0,
-        subject_embed_dim: int = 16,
         num_classes: int = 2,
     ) -> None:
         super().__init__()
@@ -73,12 +69,6 @@ class EEGNet(nn.Module):
         # ---- Head -----------------------------------------------------------
         self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 8))
         fc_in = f2 * 8
-
-        self.subject_embed: nn.Embedding | None = None
-        if num_subjects > 0:
-            self.subject_embed = nn.Embedding(num_subjects, subject_embed_dim)
-            fc_in += subject_embed_dim
-
         hidden = max(fc_in // 3, 32)
         self.fc1 = nn.Linear(fc_in, hidden)
         self.bn_fc = nn.BatchNorm1d(hidden)
@@ -100,8 +90,7 @@ class EEGNet(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: torch.Tensor,
-                subject_idx: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Block 1: multi-scale temporal → spatial collapse
         x = torch.cat([conv(x) for conv in self.temp_convs], dim=1)
         x = self.bn_temp(x)
@@ -125,11 +114,6 @@ class EEGNet(nn.Module):
         # Head
         x = self.adaptive_pool(x)
         x = torch.flatten(x, 1)
-
-        if self.subject_embed is not None and subject_idx is not None:
-            s = self.subject_embed(subject_idx)
-            x = torch.cat([x, s], dim=1)
-
         x = self.fc1(x)
         x = self.bn_fc(x)
         x = F.relu(x)

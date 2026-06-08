@@ -1,7 +1,7 @@
 """Training script for EEG binary classification.
 
 Key techniques for small-data regime (~1500 samples):
-- EEGNet with optional SE attention
+- EEGNet — multi-scale depthwise-separable CNN
 - Mixup augmentation — smoother decision boundaries
 - SWA (Stochastic Weight Averaging) — better generalization
 - Warmup + CosineAnnealingWarmRestarts — stable training
@@ -57,10 +57,6 @@ CONFIG: Dict = {
     "depth": 2,
     "f2": 32,               # = depth * f1
     "dropout_rate": 0.4,
-    "use_se": False,         # enable with --se
-    "use_subject": False,    # enable with --use-subject
-    "subject_embed_dim": 16,
-
     # Optimizer
     "learning_rate": 2e-3,
     "weight_decay": 1e-3,
@@ -82,9 +78,10 @@ CONFIG: Dict = {
     "swa_lr": 5e-4,
 
     # CV
-    "cv_mode": "kfold",      # "kfold" | "single"
+    "cv_mode": "kfold",      # "kfold" | "single" | "mccv"
     "k_folds": 5,
     "val_ratio": 0.2,
+    "mccv_rounds": 20,
 }
 
 
@@ -139,18 +136,13 @@ def mixup_criterion(criterion, pred, y_a, y_b, lam):
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def evaluate(model, dataloader, criterion, device, use_subject=False):
+def evaluate(model, dataloader, criterion, device):
     model.eval()
     total_loss, total, correct = 0.0, 0, 0
     for batch in dataloader:
-        if use_subject:
-            eeg, labels, subj = batch
-            subj = subj.to(device)
-        else:
-            eeg, labels = batch
-            subj = None
+        eeg, labels = batch
         eeg, labels = eeg.to(device), labels.to(device)
-        logits = model(eeg, subject_idx=subj)
+        logits = model(eeg)
         loss = criterion(logits, labels)
         total_loss += loss.item() * labels.size(0)
         total += labels.size(0)
@@ -174,7 +166,6 @@ def train_one_fold(
     # ---- Datasets ---------------------------------------------------------
     ds_kwargs = dict(
         data_dir=CONFIG["train_dir"], label_csv=CONFIG["train_label_csv"],
-        return_subject=params["use_subject"],
     )
     train_ds = EEGDataset(
         **ds_kwargs, selected_indices=train_indices,
@@ -198,13 +189,10 @@ def train_one_fold(
     # ---- Model -------------------------------------------------------------
     sample = train_ds[0]
     sample_eeg = sample[0]
-    num_subjects = len(train_ds.subject_to_idx) if params["use_subject"] else 0
     model = EEGNet(
         input_shape=tuple(sample_eeg.shape),
         f1=params["f1"], depth=params["depth"], f2=params["f2"],
-        dropout_rate=params["dropout_rate"], use_se=params["use_se"],
-        num_subjects=num_subjects,
-        subject_embed_dim=params["subject_embed_dim"],
+        dropout_rate=params["dropout_rate"],
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Params: {n_params:,}")
@@ -247,8 +235,10 @@ def train_one_fold(
     )
 
     # ---- Training loop -----------------------------------------------------
+    save_model = params.get("save_model", True)
     fold_dir = MODEL_DIR / f"eegnet_fold{fold}"
-    fold_dir.mkdir(parents=True, exist_ok=True)
+    if save_model:
+        fold_dir.mkdir(parents=True, exist_ok=True)
 
     best_state = None
     best_val_acc = -1.0
@@ -270,22 +260,17 @@ def train_one_fold(
         running_loss, train_total = 0.0, 0
 
         for batch in train_loader:
-            if params["use_subject"]:
-                eeg, labels, subj = batch
-                subj = subj.to(device)
-            else:
-                eeg, labels = batch
-                subj = None
+            eeg, labels = batch
             eeg, labels = eeg.to(device), labels.to(device)
 
             optimizer.zero_grad(set_to_none=True)
 
             if params["mixup_alpha"] > 0:
                 mixed, y_a, y_b, lam = mixup_data(eeg, labels, params["mixup_alpha"])
-                logits = model(mixed, subject_idx=subj)
+                logits = model(mixed)
                 loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
             else:
-                logits = model(eeg, subject_idx=subj)
+                logits = model(eeg)
                 loss = criterion(logits, labels)
 
             loss.backward()
@@ -297,8 +282,7 @@ def train_one_fold(
             train_total += labels.size(0)
 
         # Validate
-        val_loss, val_acc = evaluate(model, val_loader, criterion, device,
-                                     use_subject=params["use_subject"])
+        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
 
         if epoch > params["warmup_epochs"]:
             cos_scheduler.step()
@@ -333,20 +317,13 @@ def train_one_fold(
     # ---- Finalize -----------------------------------------------------------
     if best_state is not None:
         model.load_state_dict(best_state)
-        torch.save(best_state, fold_dir / "best_model.pth")
+        if save_model:
+            torch.save(best_state, fold_dir / "best_model.pth")
 
     if epoch >= params["swa_start"]:
-        # Custom BN update: built-in update_bn() doesn't pass subject_idx
-        swa_model.train()
-        with torch.no_grad():
-            for batch in train_loader:
-                if params["use_subject"]:
-                    eeg, _, subj = batch
-                    swa_model(eeg.to(device), subject_idx=subj.to(device))
-                else:
-                    swa_model(batch[0].to(device))
-        swa_model.eval()
-        torch.save(deepcopy(swa_model.state_dict()), fold_dir / "best_ema.pth")
+        torch.optim.swa_utils.update_bn(train_loader, swa_model, device)
+        if save_model:
+            torch.save(deepcopy(swa_model.state_dict()), fold_dir / "best_ema.pth")
 
     return best_state, best_val_acc, best_epoch
 
@@ -369,31 +346,31 @@ def run_kfold_cv(params: Dict, device: torch.device) -> List[Dict]:
     return results
 
 
-def run_loso_cv(params: Dict, device: torch.device) -> List[Dict]:
-    """Leave-One-Subject-Out cross-validation."""
-    df = pd.read_csv(CONFIG["train_label_csv"])
-    subjects = sorted(df["subject"].unique())
+def run_mccv(params: Dict, device: torch.device) -> List[Dict]:
+    """Monte Carlo Cross-Validation.
 
-    if len(subjects) < 2:
-        raise ValueError("LOSO requires at least 2 subjects in the data.")
-
-    print(f"Subjects: {', '.join(subjects)}")
+    Repeated random stratified 80/20 splits with different seeds.
+    Does NOT save model checkpoints — only returns validation stats.
+    """
+    rounds = CONFIG["mccv_rounds"]
+    val_ratio = CONFIG["val_ratio"]
+    params["save_model"] = False  # MCCV is evaluation-only
+    print(f"MCCV: {rounds} rounds, {1 - val_ratio:.0%}/{val_ratio:.0%} split\n")
 
     results = []
-    for fold, held_out in enumerate(subjects):
-        val_mask = df["subject"] == held_out
-        val_idx = sorted(df[val_mask].index.tolist())
-        train_idx = sorted(df[~val_mask].index.tolist())
+    for r in range(rounds):
+        seed = CONFIG["seed"] + r
+        train_idx, val_idx = build_split_indices(
+            CONFIG["train_label_csv"], val_ratio=val_ratio, seed=seed)
 
-        print(f"\n{'='*55}\nFold {fold+1}/{len(subjects)}  "
-              f"val={held_out}  (train={len(train_idx)}, val={len(val_idx)})\n{'='*55}")
+        print(f"\n{'─'*55}")
+        print(f"Round {r + 1}/{rounds}  "
+              f"(seed={seed})  train={len(train_idx)}  val={len(val_idx)}")
+        print(f"{'─'*55}")
 
-        _, acc, ep = train_one_fold(fold, train_idx, val_idx, params, device)
-        results.append({
-            "fold": fold, "val_subject": held_out,
-            "val_acc": acc, "best_epoch": ep,
-        })
-        print(f"  {held_out}: best_acc={acc:.4f} (epoch {ep})")
+        _, acc, ep = train_one_fold(r, train_idx, val_idx, params, device)
+        results.append({"round": r, "seed": seed, "val_acc": acc, "best_epoch": ep})
+        print(f"  Round {r + 1}: best_acc={acc:.4f} (epoch {ep})")
 
     return results
 
@@ -411,26 +388,27 @@ def run_single_split(params: Dict, device: torch.device):
 # Coordinate-wise line search
 # ---------------------------------------------------------------------------
 
-def line_search(device: torch.device, rounds: int = 2) -> None:
+def line_search(device: torch.device, rounds: int = 3) -> None:
     """Coordinate-wise hyperparameter search.
 
     Each round: fix 4 params, vary the 5th.
-    Total: ~15 runs/round instead of 3^5=243 for full grid search.
+    Total: 5 params × ~5 values × 3 rounds ≈ 75 runs.
     """
     search_space = [
-        ("f1",              [16, 20, 24]),
-        ("dropout_rate",    [0.25, 0.3, 0.4]),
-        ("learning_rate",   [5e-4, 1e-3, 2e-3]),
-        ("weight_decay",    [1e-3, 5e-3, 1e-2]),
-        ("mixup_alpha",     [0.0, 0.2, 0.4]),
+        ("f1",              [8, 12, 16, 20, 24]),
+        ("dropout_rate",    [0.2, 0.3, 0.4, 0.5]),
+        ("learning_rate",   [1e-4, 5e-4, 1e-3, 2e-3, 5e-3]),
+        ("weight_decay",    [1e-4, 5e-4, 1e-3, 5e-3, 1e-2]),
+        ("mixup_alpha",     [0.0, 0.1, 0.2, 0.3, 0.4]),
     ]
 
     best_params = _build_params()
     best_acc = 0.0
     best_state = None
 
-    print(f"Line search: {len(search_space)} params × {rounds} rounds "
-          f"≈ {len(search_space) * 3 * rounds} runs\n")
+    avg_vals = sum(len(vals) for _, vals in search_space) / len(search_space)
+    print(f"Line search: {len(search_space)} params × ~{avg_vals:.0f} values × {rounds} rounds "
+          f"≈ {int(len(search_space) * avg_vals * rounds)} runs\n")
 
     for r in range(rounds):
         print(f"{'='*55}")
@@ -478,6 +456,9 @@ def line_search(device: torch.device, rounds: int = 2) -> None:
         torch.save(best_state, MODEL_DIR / "best_model.pth")
         print(f"Saved to {MODEL_DIR / 'best_model.pth'}")
 
+    # Save search log
+    _save_search_csv(search_space, best_params, best_acc)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -485,13 +466,30 @@ def line_search(device: torch.device, rounds: int = 2) -> None:
 
 def _build_params() -> Dict:
     return {k: CONFIG[k] for k in [
-        "f1", "depth", "f2", "dropout_rate", "use_se",
-        "use_subject", "subject_embed_dim",
+        "f1", "depth", "f2", "dropout_rate",
         "learning_rate", "weight_decay", "batch_size",
         "label_smoothing", "mixup_alpha", "focal_gamma",
         "grad_clip_norm", "scheduler_t0", "scheduler_t_mult",
         "warmup_epochs", "swa_start", "swa_lr",
     ]}
+
+
+def _save_search_csv(
+    search_space: list, best_params: dict, best_acc: float,
+) -> None:
+    """Append search result to models/search_results.csv."""
+    import datetime
+    row = {"timestamp": datetime.datetime.now().isoformat(),
+           "best_val_acc": round(best_acc, 6)}
+    for key, _ in search_space:
+        row[key] = best_params[key]
+    df = pd.DataFrame([row])
+    csv_path = MODEL_DIR / "search_results.csv"
+    if csv_path.exists():
+        df.to_csv(csv_path, mode="a", header=False, index=False)
+    else:
+        df.to_csv(csv_path, index=False)
+    print(f"Search log: {csv_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -506,10 +504,6 @@ def main() -> None:
     p.add_argument("--depth", type=int, default=CONFIG["depth"])
     p.add_argument("--f2", type=int, default=None)
     p.add_argument("--dropout", type=float, default=CONFIG["dropout_rate"])
-    p.add_argument("--se", action="store_true", help="Enable SE attention")
-    p.add_argument("--use-subject", action="store_true",
-                   help="Enable subject embedding")
-
     # Training
     p.add_argument("--epochs", type=int, default=CONFIG["epochs"])
     p.add_argument("--lr", type=float, default=CONFIG["learning_rate"])
@@ -524,12 +518,15 @@ def main() -> None:
 
     # CV
     p.add_argument("--cv", default=CONFIG["cv_mode"],
-                   choices=["kfold", "loso", "single"])
+                   choices=["kfold", "single", "mccv"])
     p.add_argument("--k-folds", type=int, default=CONFIG["k_folds"])
+    p.add_argument("--mccv-rounds", type=int, default=CONFIG["mccv_rounds"])
 
     # Line search
     p.add_argument("--tune", action="store_true",
-                   help="Coordinate-wise hyperparameter search (~15 runs/round)")
+                   help="Coordinate-wise hyperparameter search (5 params)")
+    p.add_argument("--tune-rounds", type=int, default=3,
+                   help="Number of rounds for --tune (default: 3)")
 
     args = p.parse_args()
 
@@ -537,8 +534,6 @@ def main() -> None:
     CONFIG["depth"] = args.depth
     CONFIG["f2"] = args.f2 if args.f2 else args.depth * args.f1
     CONFIG["dropout_rate"] = args.dropout
-    CONFIG["use_se"] = args.se
-    CONFIG["use_subject"] = args.use_subject
     CONFIG["epochs"] = args.epochs
     CONFIG["learning_rate"] = args.lr
     CONFIG["batch_size"] = args.batch_size
@@ -550,6 +545,7 @@ def main() -> None:
     CONFIG["use_cpu"] = args.cpu
     CONFIG["cv_mode"] = args.cv
     CONFIG["k_folds"] = args.k_folds
+    CONFIG["mccv_rounds"] = args.mccv_rounds
 
     set_seed(CONFIG["seed"])
     device = get_device(CONFIG["use_cpu"])
@@ -562,21 +558,25 @@ def main() -> None:
     params = _build_params()
 
     if args.tune:
-        line_search(device)
+        line_search(device, rounds=args.tune_rounds)
         return
 
     if CONFIG["cv_mode"] == "single":
         state, acc, ep = run_single_split(params, device)
         torch.save(state, MODEL_DIR / "best_model.pth")
         print(f"\nBest val_acc: {acc:.4f} (epoch {ep})")
-    elif CONFIG["cv_mode"] == "loso":
-        results = run_loso_cv(params, device)
+    elif CONFIG["cv_mode"] == "mccv":
+        results = run_mccv(params, device)
         accs = [r["val_acc"] for r in results]
+        epochs = [r["best_epoch"] for r in results]
         print(f"\n{'='*55}")
-        print("LOSO CV (Leave-One-Subject-Out)")
-        for r in results:
-            print(f"  {r['val_subject']}: {r['val_acc']:.4f} @ ep {r['best_epoch']}")
-        print(f"  Mean: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
+        print(f"MCCV ({CONFIG['mccv_rounds']} rounds, "
+              f"{1 - CONFIG['val_ratio']:.0%}/{CONFIG['val_ratio']:.0%} split)")
+        print(f"  Mean val_acc: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
+        print(f"  Median: {np.median(accs):.4f}")
+        print(f"  Min: {np.min(accs):.4f}  Max: {np.max(accs):.4f}")
+        print(f"  Best epoch mean: {np.mean(epochs):.0f}")
+        print(f"  (No models saved — MCCV is for evaluation only)")
         print(f"{'='*55}")
     else:
         results = run_kfold_cv(params, device)
